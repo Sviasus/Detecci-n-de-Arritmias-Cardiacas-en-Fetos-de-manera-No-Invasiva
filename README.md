@@ -41,6 +41,10 @@ El proyecto implementa un pipeline clínico-técnico de extremo a extremo dividi
 git clone https://github.com/**tu_usuario**/Detecci-n-de-Arritmias-Cardiacas-en-Fetos-de-manera-No-Invasiva.git
 cd Detecci-n-de-Arritmias-Cardiacas-en-Fetos-de-manera-No-Invasiva
 
+📢 Aviso de flujo de trabajo en Git:
+
+Por favor, trabajar únicamente sobre sus respectivas ramas individuales (juliana y santiago). Una vez completados y probados los cambios, realizaremos la integración mediante un Pull Request hacia la rama develop. ¡Evitemos subir cambios directos a develop o main!
+
 
 ## 🛠️ Configuración del Entorno y Guía de Ejecución
 
