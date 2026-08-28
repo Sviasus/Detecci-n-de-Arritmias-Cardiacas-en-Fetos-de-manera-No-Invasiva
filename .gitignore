@@ -1,0 +1,8 @@
+# Archivo: .gitignore
+data/
+*.dat
+*.hea
+*.fqrs
+__pycache__/
+.vscode/
+venv/
