@@ -38,5 +38,5 @@ El proyecto implementa un pipeline clínico-técnico de extremo a extremo dividi
 
 ### 1. Clonar el repositorio
 ```bash
-git clone [https://github.com/tu-usuario/tu-repositorio.git](https://github.com/tu-usuario/tu-repositorio.git)
+git clone https://github.com/**tu_usuario**/Detecci-n-de-Arritmias-Cardiacas-en-Fetos-de-manera-No-Invasiva.git
 cd Detecci-n-de-Arritmias-Cardiacas-en-Fetos-de-manera-No-Invasiva
