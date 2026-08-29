@@ -1,8 +1,28 @@
-# Archivo: .gitignore
-data/
+# Entornos virtuales y dependencias
+venv/
+env/
+.venv/
+
+# Caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+src/__pycache__/
+
+# Configuración de editores
+.vscode/
+.idea/
+
+# Señales pesadas y temporales de PhysioNet
 *.dat
 *.hea
 *.fqrs
-__pycache__/
-.vscode/
-venv/
+*.mat
+*.zip
+*.tar.gz
+data/cinc2013/
+data/fecgsyndb/
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db 
