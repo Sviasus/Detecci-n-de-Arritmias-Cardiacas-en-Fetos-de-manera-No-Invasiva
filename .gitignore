@@ -25,4 +25,7 @@ data/fecgsyndb/
 
 # Archivos de sistema
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Scripts de prueba temporales
+scratch/

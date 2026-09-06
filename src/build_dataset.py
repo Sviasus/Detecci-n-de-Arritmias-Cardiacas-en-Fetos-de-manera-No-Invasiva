@@ -1,27 +1,29 @@
 import os
 import sys
-
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-if CURRENT_DIR not in sys.path:
-    sys.path.append(CURRENT_DIR)
-
-import wfdb
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import wfdb
+
+CURRENT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = CURRENT_DIR.parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.append(str(CURRENT_DIR))
 
 from data_streamer import stream_nifeadb
 from fqrs_detector import extraer_fqrs_optimo
 from feature_extraction import extraer_vector_caracteristicas_completo
 
-DATA_DIR = "data"
-os.makedirs(DATA_DIR, exist_ok=True)
-CSV_PATH = os.path.join(DATA_DIR, "dataset_features.csv")
+DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR.mkdir(exist_ok=True)
+CSV_PATH = DATA_DIR / "dataset_features.csv"
 
 
 def procesar_registro(sig_4ch, fs):
     """
-    Pipeline de preprocesamiento, detección de picos fQRS y extracción de fHRV.
+    Pipeline de la Fase 2: preprocesamiento, cancelación materna mQRS,
+    separación FastICA y extracción de fHRV con bandas fetales reales.
     """
     try:
         picos = extraer_fqrs_optimo(sig_4ch, fs)
@@ -32,103 +34,83 @@ def procesar_registro(sig_4ch, fs):
         return None
 
 
-def guardar_fila_csv(fila_dict):
+def extraer_segmentos_paciente(sig_4ch, fs, duracion_ventana_s=90.0, paso_s=45.0):
     """
-    Guarda progresivamente cada fila en disco para evitar pérdida de progreso.
+    Segmenta un registro largo en ventanas clínicas para enriquecer el dataset
+    preservando el identificador de paciente para GroupKFold.
     """
-    df_fila = pd.DataFrame([fila_dict])
-    if not os.path.exists(CSV_PATH):
-        df_fila.to_csv(CSV_PATH, index=False)
-    else:
-        df_fila.to_csv(CSV_PATH, mode='a', header=False, index=False)
+    n_samples = len(sig_4ch)
+    pts_ventana = int(duracion_ventana_s * fs)
+    pts_paso = int(paso_s * fs)
+    vectores = []
+
+    # 1. Procesar el registro completo primero
+    v_completo = procesar_registro(sig_4ch, fs)
+    if v_completo is not None:
+        vectores.append(v_completo)
+
+    # 2. Si la señal es lo bastante extensa, extraer ventanas deslizantes
+    if n_samples >= pts_ventana + pts_paso:
+        for inicio in range(0, n_samples - pts_ventana + 1, pts_paso):
+            segmento = sig_4ch[inicio:inicio + pts_ventana]
+            v_seg = procesar_registro(segmento, fs)
+            if v_seg is not None and v_seg.get("Num_Latidos_Validos", 0) >= 15:
+                vectores.append(v_seg)
+
+    return vectores
 
 
-def obtener_registros_ya_procesados():
-    if os.path.exists(CSV_PATH):
-        try:
-            df = pd.read_csv(CSV_PATH)
-            return set(df["Registro"].dropna().unique())
-        except Exception:
-            return set()
-    return set()
-
-
-def procesar_nifeadb():
-    print("\n--- Procesando NIFEA DB (Validación Clínica Real: 26 casos) ---")
+def construir_dataset_nifeadb(reset=False):
+    """
+    Procesa los 26 pacientes clínicos reales de NIFEA DB (12 con arritmia y 14 normales).
+    """
+    print("\n--- Procesando Pacientes Clínicos Reales de NIFEA DB (Fase 3) ---")
     registros_arr = [f"ARR_{i:02d}" for i in range(1, 13)]
     registros_nr = [f"NR_{i:02d}" for i in range(1, 15)]
-    ya_procesados = obtener_registros_ya_procesados()
 
+    filas_acumuladas = []
+
+    # 1. Casos de Arritmia Clínica (Clase 1)
     for rec in tqdm(registros_arr, desc="NIFEA Arritmias (Clase 1)"):
-        if rec in ya_procesados:
-            continue
         try:
             sig, fs, _ = stream_nifeadb(rec)
-            feats = procesar_registro(sig, fs)
-            if feats is not None:
-                feats["Registro"] = rec
-                feats["Dataset"] = "NIFEA_DB"
-                feats["Target"] = 1
-                guardar_fila_csv(feats)
+            segmentos = extraer_segmentos_paciente(sig, fs, duracion_ventana_s=90.0, paso_s=45.0)
+            for v in segmentos:
+                v["Registro"] = rec
+                v["Dataset"] = "NIFEA_DB"
+                v["Target"] = 1
+                filas_acumuladas.append(v)
         except Exception as e:
-            print(f"Error en {rec}: {e}")
+            print(f"Aviso: error en {rec}: {e}")
 
-    for rec in tqdm(registros_nr, desc="NIFEA Normales (Clase 0)"):
-        if rec in ya_procesados:
-            continue
+    # 2. Casos Normales de Control (Clase 0)
+    for rec in tqdm(registros_nr, desc="NIFEA Controles Sanos (Clase 0)"):
         try:
             sig, fs, _ = stream_nifeadb(rec)
-            feats = procesar_registro(sig, fs)
-            if feats is not None:
-                feats["Registro"] = rec
-                feats["Dataset"] = "NIFEA_DB"
-                feats["Target"] = 0
-                guardar_fila_csv(feats)
+            segmentos = extraer_segmentos_paciente(sig, fs, duracion_ventana_s=90.0, paso_s=45.0)
+            for v in segmentos:
+                v["Registro"] = rec
+                v["Dataset"] = "NIFEA_DB"
+                v["Target"] = 0
+                filas_acumuladas.append(v)
         except Exception as e:
-            print(f"Error en {rec}: {e}")
+            print(f"Aviso: error en {rec}: {e}")
 
+    df = pd.DataFrame(filas_acumuladas)
 
-def procesar_fecgsyndb(limite_muestras=100):
-    print(f"\n--- Procesando FECGSYNDB (Simulador: {limite_muestras} casos) ---")
-    try:
-        lista_remota = wfdb.get_record_list('fecgsyndb')
-    except Exception as e:
-        print(f"Error obteniendo lista remota de PhysioNet: {e}")
-        return
+    # Eliminar posibles filas duplicadas exactas en las características numéricas
+    cols_meta = ["Registro", "Dataset", "Target"]
+    cols_feat = [c for c in df.columns if c not in cols_meta]
+    df = df.drop_duplicates(subset=cols_feat).reset_index(drop=True)
 
-    indices_cruz = [3, 12, 15, 27]
-    ya_procesados = obtener_registros_ya_procesados()
-    muestras = lista_remota[:limite_muestras]
+    df.to_csv(CSV_PATH, index=False)
+    print(f"\n[OK] Dataset generado exitosamente en: {CSV_PATH}")
+    print(f"Total de muestras clínicas: {len(df)}")
 
-    for item in tqdm(muestras, desc="FECGSYNDB"):
-        sub_folder, rec_name = os.path.split(item)
-        if rec_name in ya_procesados:
-            continue
-        try:
-            pn_path = f"fecgsyndb/1.0.0/{sub_folder}"
-            record = wfdb.rdrecord(rec_name, pn_dir=pn_path)
-            sig_4ch = record.p_signal[:, indices_cruz]
-            fs = record.fs
-
-            feats = procesar_registro(sig_4ch, fs)
-            if feats is not None:
-                feats["Registro"] = rec_name
-                feats["Dataset"] = "FECGSYNDB"
-                feats["Target"] = 0 if "_c0" in rec_name else 1
-                guardar_fila_csv(feats)
-        except Exception:
-            continue
+    print(f"Pacientes únicos representados: {df['Registro'].nunique()}")
+    print(f"Distribución de Clases:\n{df['Target'].value_counts().to_string()}")
+    return df
 
 
 if __name__ == "__main__":
-    procesar_nifeadb()
-    # 100 registros sintéticos balanceados son suficientes para pre-entrenamiento inicial
-    procesar_fecgsyndb(limite_muestras=100)
-
-    if os.path.exists(CSV_PATH):
-        df_res = pd.read_csv(CSV_PATH)
-        print("\n=======================================================")
-        print(f"Dataset consolidado en: {CSV_PATH}")
-        print(f"Total de registros listos: {len(df_res)}")
-        print(f"Distribución de Clases (Target):\n{df_res['Target'].value_counts().to_string()}")
-        print("=======================================================")
+    construir_dataset_nifeadb(reset=True)
