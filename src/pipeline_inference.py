@@ -1,29 +1,33 @@
 import os
 import sys
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import joblib
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-if CURRENT_DIR not in sys.path:
-    sys.path.append(CURRENT_DIR)
+CURRENT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = CURRENT_DIR.parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.append(str(CURRENT_DIR))
 
-from preprocessing import aplicar_filtros
 from fqrs_detector import extraer_fqrs_optimo
 from feature_extraction import calcular_tacograma_rr, extraer_vector_caracteristicas_completo
 
-MODELS_DIR = "models"
+MODELS_DIR = PROJECT_ROOT / "models"
 
 
 class DiagnosticoArritmiaFetalPipeline:
-    def __init__(self):
-        modelo_path = os.path.join(MODELS_DIR, "detector_arritmias_fetal.pkl")
-        scaler_path = os.path.join(MODELS_DIR, "scaler_fhrv.pkl")
-        features_path = os.path.join(MODELS_DIR, "feature_names.pkl")
-        threshold_path = os.path.join(MODELS_DIR, "decision_threshold.pkl")
+    def __init__(self, models_dir=None):
+        base_models = Path(models_dir) if models_dir else MODELS_DIR
+        modelo_path = base_models / "detector_arritmias_fetal.pkl"
+        scaler_path = base_models / "scaler_fhrv.pkl"
+        features_path = base_models / "feature_names.pkl"
+        threshold_path = base_models / "decision_threshold.pkl"
 
-        if not all(os.path.exists(p) for p in [modelo_path, scaler_path, features_path, threshold_path]):
-            raise FileNotFoundError("Artefactos del modelo no encontrados en models/. Ejecute src/model_trainer.py primero.")
+        if not all(p.exists() for p in [modelo_path, scaler_path, features_path, threshold_path]):
+            raise FileNotFoundError(
+                f"Artefactos del modelo no encontrados en '{base_models}'. Ejecute src/model_trainer.py primero."
+            )
 
         self.modelo = joblib.load(modelo_path)
         self.scaler = joblib.load(scaler_path)
@@ -34,14 +38,19 @@ class DiagnosticoArritmiaFetalPipeline:
         """
         Ejecuta el pipeline clínico completo sobre un registro de 4 canales.
         """
-        # 1. Extracción de fQRS
-        picos_fqrs = extraer_fqrs_optimo(sig_cruda_4ch, fs)
+        # 1. Extracción de fQRS e intermediarios para visualización
+        picos_fqrs, fecg_ica, fuentes, idx_fetal, sig_filt = extraer_fqrs_optimo(
+            sig_cruda_4ch, fs, return_intermediates=True
+        )
         if len(picos_fqrs) < 10:
             return {
                 "error": "Señal insuficiente o calidad muy baja para identificar picos fetales.",
                 "picos_fqrs": picos_fqrs,
+                "fecg_ica": fecg_ica,
+                "sig_filtrada": sig_filt,
                 "tacograma_rr": np.array([])
             }
+
 
         # 2. Tacograma y fHRV
         tacograma_rr = calcular_tacograma_rr(picos_fqrs, fs)
@@ -64,9 +73,14 @@ class DiagnosticoArritmiaFetalPipeline:
             "confianza": (prob_arritmia if es_arritmia == 1 else (1.0 - prob_arritmia)) * 100.0,
             "umbral_usado": self.umbral_decision,
             "picos_fqrs": picos_fqrs,
+            "fecg_ica": fecg_ica,
+            "fuentes": fuentes,
+            "idx_fetal": idx_fetal,
+            "sig_filtrada": sig_filt,
             "tacograma_rr": tacograma_rr,
             "metricas_fhrv": vector_completo
         }
+
 
 
 if __name__ == "__main__":

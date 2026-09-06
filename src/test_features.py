@@ -72,7 +72,15 @@ def ejecutar_test_comparativo():
     axes[1, 1].grid(True, linestyle='--', alpha=0.5)
 
     plt.tight_layout()
-    plt.show()
+    output_fig = os.path.join(CURRENT_DIR, "..", "data", "test_features_comparativo.png")
+    os.makedirs(os.path.dirname(output_fig), exist_ok=True)
+    plt.savefig(output_fig, dpi=150)
+    print(f"\n[Gráfico Guardado Exitosamente]: {output_fig}")
+    # En entornos no interactivos, cerrar figura para liberar memoria
+    if not os.environ.get("NON_INTERACTIVE"):
+        plt.show()
+    plt.close()
+
 
 
 if __name__ == "__main__":
