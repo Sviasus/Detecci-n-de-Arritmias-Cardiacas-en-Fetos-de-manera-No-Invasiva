@@ -1,118 +1,83 @@
 import numpy as np
-import pandas as pd
-from scipy import signal
+import scipy.signal as signal
+from scipy.signal import butter, filtfilt, iirnotch, medfilt
 from sklearn.decomposition import FastICA
-import matplotlib.pyplot as plt
-from data_streamer import stream_cinc2013
 
 
-def limpiar_nans(sig):
-    """
-    Rellena valores NaN o Inf usando interpolación lineal por columna.
-    """
-    df = pd.DataFrame(sig)
-    # Interpolar hacia adelante y hacia atrás para bordes
-    df = df.interpolate(method='linear', limit_direction='both', axis=0)
-    df = df.fillna(0.0)
-    return df.to_numpy()
+def filtro_butter_pasa_banda(data, lowcut=1.0, highcut=45.0, fs=1000.0, order=3):
+    nyquist = 0.5 * fs
+    low = max(1e-4, min(lowcut / nyquist, 0.99))
+    high = max(low + 1e-4, min(highcut / nyquist, 0.99))
+    b, a = butter(order, [low, high], btype='bandpass')
+    return filtfilt(b, a, data, axis=0)
 
 
-def aplicar_filtros(sig, fs=1000):
-    """
-    Limpia NaNs y aplica filtro pasa-banda (1-100 Hz) y Notch (50 y 60 Hz).
-    """
-    # 0. Limpieza previa de NaNs
-    sig_limpia = limpiar_nans(sig)
-
-    # 1. Pasa-banda Butterworth orden 3 (1 a 100 Hz)
-    nyq = 0.5 * fs
-    low = 1.0 / nyq
-    high = 100.0 / nyq
-    b_band, a_band = signal.butter(3, [low, high], btype='bandpass')
-    sig_band = signal.filtfilt(b_band, a_band, sig_limpia, axis=0)
-
-    # 2. Notch 50 Hz y 60 Hz
-    for f0 in [50.0, 60.0]:
-        w0 = f0 / nyq
-        Q = 30.0
-        b_notch, a_notch = signal.iirnotch(w0, Q)
-        sig_band = signal.filtfilt(b_notch, a_notch, sig_band, axis=0)
-
-    return sig_band
+def filtro_notch(data, f0=50.0, Q=30.0, fs=1000.0):
+    nyquist = 0.5 * fs
+    w0 = f0 / nyquist
+    if 0 < w0 < 1:
+        b, a = iirnotch(w0, Q)
+        return filtfilt(b, a, data, axis=0)
+    return data
 
 
-def extraer_componentes_ica(sig_filtrada, random_state=42):
-    """
-    Aplica FastICA a los 4 canales garantizando datos finitos.
-    """
-    # Verificación de seguridad de finitud
-    sig_filtrada = np.nan_to_num(sig_filtrada, nan=0.0, posinf=0.0, neginf=0.0)
-    ica = FastICA(n_components=4, random_state=random_state, max_iter=1000, tol=1e-4)
-    fuentes_ica = ica.fit_transform(sig_filtrada)
-    return fuentes_ica
+def remover_deriva_linea_base(senal, fs=1000.0):
+    w1 = int(0.2 * fs)
+    if w1 % 2 == 0:
+        w1 += 1
+    w2 = int(0.6 * fs)
+    if w2 % 2 == 0:
+        w2 += 1
+        
+    if len(senal) > w2:
+        base1 = medfilt(senal, kernel_size=w1)
+        linea_base = medfilt(base1, kernel_size=w2)
+        return senal - linea_base
+    return senal - np.mean(senal)
 
 
-def seleccionar_canal_fetal(fuentes_ica, fs=1000):
-    """
-    Selecciona la componente con mayor relación de potencia espectral en rango fetal (1.8 - 3.0 Hz).
-    """
-    mejores_scores = []
+def normalizar_zscore(senal):
+    desv = np.nanstd(senal)
+    if desv > 1e-8:
+        return (senal - np.nanmean(senal)) / desv
+    return senal - np.nanmean(senal)
+
+
+def preprocesar_senal_multicanal(signals, fs=1000.0, aplicar_notch=True, normalizar=False):
+    signals = np.asarray(signals, dtype=np.float64)
+    if signals.ndim == 1:
+        signals = signals[:, np.newaxis]
+        
+    n_samples, n_channels = signals.shape
+    signals_proc = np.zeros_like(signals)
     
-    for ch in range(fuentes_ica.shape[1]):
-        comp = fuentes_ica[:, ch]
-        freqs, psd = signal.welch(comp, fs=fs, nperseg=int(fs*2))
+    for ch in range(n_channels):
+        raw_ch = signals[:, ch]
+        ch_centered = raw_ch - np.nanmean(raw_ch)
+        ch_no_drift = remover_deriva_linea_base(ch_centered, fs=fs)
+        ch_band = filtro_butter_pasa_banda(ch_no_drift, lowcut=1.0, highcut=45.0, fs=fs, order=3)
         
-        # Banda fetal: 1.8 a 3.0 Hz (~110-180 bpm)
-        idx_fetal = np.logical_and(freqs >= 1.8, freqs <= 3.0)
-        # Banda materna: 1.0 a 1.6 Hz (~60-96 bpm)
-        idx_materno = np.logical_and(freqs >= 1.0, freqs <= 1.6)
-        
-        potencia_fetal = np.sum(psd[idx_fetal])
-        potencia_materna = np.sum(psd[idx_materno]) + 1e-8
-        
-        score = potencia_fetal / potencia_materna
-        mejores_scores.append(score)
-
-    canal_fetal_idx = int(np.argmax(mejores_scores))
-    return canal_fetal_idx, fuentes_ica[:, canal_fetal_idx]
-
-
-def visualizar_proceso_preprocesamiento(sig_cruda, sig_filtrada, fuentes_ica, idx_fetal, fs=1000, seg=5):
-    n_muestras = int(seg * fs)
-    t = np.linspace(0, seg, n_muestras)
-
-    fig, axes = plt.subplots(4, 2, figsize=(14, 8), sharex=True)
-    fig.suptitle("Etapa 1: Señales Filtradas vs Componentes FastICA", fontsize=13)
-
-    for i in range(4):
-        axes[i, 0].plot(t, sig_filtrada[:n_muestras, i], color='tab:blue', lw=0.8)
-        axes[i, 0].set_ylabel(f"Filt Ch {i+1}")
-        axes[i, 0].grid(True, linestyle='--', alpha=0.5)
-
-        color = 'tab:red' if i == idx_fetal else 'tab:gray'
-        label_fetal = " (Candidato Fetal)" if i == idx_fetal else ""
-        axes[i, 1].plot(t, fuentes_ica[:n_muestras, i], color=color, lw=0.8)
-        axes[i, 1].set_ylabel(f"ICA {i+1}{label_fetal}")
-        axes[i, 1].grid(True, linestyle='--', alpha=0.5)
-
-    axes[-1, 0].set_xlabel("Tiempo (s)")
-    axes[-1, 1].set_xlabel("Tiempo (s)")
-    plt.tight_layout()
-    plt.show()
+        if aplicar_notch:
+            ch_n50 = filtro_notch(ch_band, f0=50.0, Q=30.0, fs=fs)
+            ch_clean = filtro_notch(ch_n50, f0=60.0, Q=30.0, fs=fs)
+        else:
+            ch_clean = ch_band
+            
+        if normalizar:
+            signals_proc[:, ch] = normalizar_zscore(ch_clean)
+        else:
+            signals_proc[:, ch] = ch_clean
+            
+    return signals_proc
 
 
-if __name__ == "__main__":
-    print("Cargando registro a01 de CinC 2013...")
-    sig_cruda, fs, fqrs_ann, ch_names = stream_cinc2013("a01")
+# Alias y funciones de compatibilidad
+def aplicar_filtros(signals, fs=1000.0):
+    return preprocesar_senal_multicanal(signals, fs=fs)
 
-    print("1. Aplicando filtros Pasa-banda y Notch (con limpieza de NaNs)...")
-    sig_filt = aplicar_filtros(sig_cruda, fs)
 
-    print("2. Ejecutando Separación Ciega de Fuentes (FastICA)...")
-    fuentes_ica = extraer_componentes_ica(sig_filt)
-
-    print("3. Seleccionando componente con predominancia fetal...")
-    idx_fetal, canal_fetal = seleccionar_canal_fetal(fuentes_ica, fs)
-    print(f"-> Componente seleccionada como fECG: ICA {idx_fetal + 1}")
-
-    visualizar_proceso_preprocesamiento(sig_cruda, sig_filt, fuentes_ica, idx_fetal, fs, seg=5)
+def extraer_componentes_ica(signals, n_components=None, random_state=42):
+    if n_components is None:
+        n_components = min(signals.shape[1], 4)
+    ica = FastICA(n_components=n_components, random_state=random_state, max_iter=1000, tol=1e-3)
+    return ica.fit_transform(signals)

@@ -1,212 +1,243 @@
 import numpy as np
-import pandas as pd
-from scipy import signal
-from data_streamer import stream_cinc2013
-from preprocessing import aplicar_filtros, extraer_componentes_ica
+import scipy.signal as signal
+from scipy.signal import butter, filtfilt, find_peaks
+from sklearn.decomposition import FastICA
+
+try:
+    from preprocessing import preprocesar_senal_multicanal
+except ImportError:
+    from src.preprocessing import preprocesar_senal_multicanal
 
 
-def suprimir_ecg_materno(sig, fs=1000):
+def cancelar_complejos_maternos(signals, fs=1000.0):
     """
-    Detecta los picos R maternos prominentes y atenúa la ventana del complejo mQRS.
+    Cancela de forma adaptativa los complejos QRS maternos (mQRS) dominantes en las señales
+    abdominales para evitar que contaminen la separación de fuentes ciegas de FastICA.
+    Aplica una ventana suave de Hanning de +/- 45 ms alrededor de cada espiga materna.
     """
-    sig_limpia = np.copy(sig)
-    
-    for ch in range(sig.shape[1]):
-        canal = sig[:, ch]
-        # Realce de picos maternos (muy anchos y altos)
-        b, a = signal.butter(2, [8.0 / (0.5 * fs), 20.0 / (0.5 * fs)], btype='bandpass')
-        canal_m = signal.filtfilt(b, a, canal)
-        canal_m_sq = canal_m ** 2
+    signals = np.asarray(signals, dtype=np.float64)
+    n_samples, n_channels = signals.shape
+    signals_suprimidas = np.copy(signals)
+
+    # 1. Identificar canal con mayor amplitud materna (envolvente RMS)
+    canal_dominante_idx = int(np.argmax(np.std(signals, axis=0)))
+    sig_ref = signals[:, canal_dominante_idx]
+
+    # 2. Filtro pasa-banda para realzar la energía del QRS materno (8 a 25 Hz)
+    nyq = 0.5 * fs
+    b, a = butter(2, [8.0 / nyq, min(25.0 / nyq, 0.99)], btype="bandpass")
+    sig_m_filt = filtfilt(b, a, sig_ref)
+
+    # 3. Derivada y elevación al cuadrado (resalta las pendientes abruptas del QRS materno)
+    sig_m_diff = np.gradient(sig_m_filt) ** 2
+    w_integ = max(1, int(0.08 * fs))
+    kernel = np.ones(w_integ) / w_integ
+    sig_m_integ = np.convolve(sig_m_diff, kernel, mode="same")
+
+    # 4. Detección de picos maternos (período refractario materno fisiológico ~450 ms -> max 130 bpm)
+    dist_minima_m = int(0.42 * fs)
+    umbral_m = np.percentile(sig_m_integ, 88)
+    picos_m_integ, _ = find_peaks(sig_m_integ, height=umbral_m, distance=dist_minima_m)
+
+    # 5. Refinamiento en la señal original para centrar exactamente el pico R materno
+    w_search = int(0.040 * fs)
+    picos_maternos = []
+    for pm in picos_m_integ:
+        ini = max(0, pm - w_search)
+        fin = min(n_samples, pm + w_search)
+        if fin > ini:
+            p_extremo = ini + np.argmax(np.abs(sig_ref[ini:fin]))
+            picos_maternos.append(p_extremo)
+
+    picos_maternos = sorted(list(set(picos_maternos)))
+
+    # 6. Atenuación adaptativa suave mediante ventana de Hanning invertida (+/- 45 ms)
+    w_mask = int(0.045 * fs)
+    len_mask = 2 * w_mask + 1
+    # Máscara suave que atenúa el 85% de la energía del latido materno sin generar bordes abruptos
+    mascara_suave = 1.0 - 0.85 * np.hanning(len_mask)
+
+    for pm in picos_maternos:
+        ini = max(0, pm - w_mask)
+        fin = min(n_samples, pm + w_mask + 1)
+        m_ini = ini - (pm - w_mask)
+        m_fin = m_ini + (fin - ini)
+
+        sub_mask = mascara_suave[m_ini:m_fin]
+        for ch in range(n_channels):
+            signals_suprimidas[ini:fin, ch] *= sub_mask
+
+    return signals_suprimidas, picos_maternos
+
+
+def aislar_componente_fecg(signals, fs=1000.0, n_components=None):
+    """
+    Separa las fuentes bioeléctricas mediante FastICA y selecciona automáticamente
+    la componente fetal basada en periodicidad y kurtosis.
+    """
+    signals = np.asarray(signals, dtype=np.float64)
+    if signals.ndim == 1:
+        signals = signals[:, np.newaxis]
+
+    n_samples, n_channels = signals.shape
+    if n_components is None:
+        n_components = min(n_channels, 4)
+
+    # FastICA con pre-blanqueo y 3000 iteraciones para garantizar convergencia matemática estable
+    ica = FastICA(
+        n_components=n_components,
+        random_state=42,
+        max_iter=3000,
+        tol=1e-3,
+        whiten="unit-variance"
+    )
+    fuentes = ica.fit_transform(signals)
+
+    # Puntuación combinada (Kurtosis + Densidad de picos en rango 110-220 bpm)
+    mejores_scores = []
+    nyq = 0.5 * fs
+    b, a = butter(2, [10.0 / nyq, min(35.0 / nyq, 0.99)], btype="bandpass")
+
+    for i in range(n_components):
+        comp = fuentes[:, i]
+        comp_filt = filtfilt(b, a, comp)
         
-        # Picos maternos: Frecuencia 50-100 bpm -> distancia min 500 ms
-        picos_m, _ = signal.find_peaks(
-            canal_m_sq, 
-            height=np.percentile(canal_m_sq, 90), 
-            distance=int(0.5 * fs)
-        )
+        # Kurtosis
+        m = np.mean(comp_filt)
+        s = np.std(comp_filt) + 1e-8
+        kurt = np.mean(((comp_filt - m) / s) ** 4)
         
-        # Blanking / atenuación suave del complejo materno (+/- 45 ms alrededor de cada pico)
-        w_blank = int(0.045 * fs)
-        for pm in picos_m:
-            i_ini = max(0, pm - w_blank)
-            i_fin = min(len(canal), pm + w_blank)
-            # Suavizado por ventana Hanning para evitar saltos abruptos
-            longitud = i_fin - i_ini
-            if longitud > 0:
-                ventana = signal.windows.hann(longitud)
-                sig_limpia[i_ini:i_fin, ch] *= (1.0 - ventana)
-
-    return sig_limpia
-
-
-def pan_tompkins_fetal(canal, fs=1000):
-    """
-    Detector Pan-Tompkins adaptado a la morfología fetal rápida (110 - 160 bpm).
-    """
-    # 1. Filtro derivativo de 5 puntos
-    h_der = np.array([-1, -2, 0, 2, 1]) * (fs / 8.0)
-    derivada = np.convolve(canal, h_der, mode='same')
-
-    # 2. Elevación al cuadrado
-    cuadrado = derivada ** 2
-
-    # 3. Integración por ventana móvil (~30 ms para fQRS)
-    n_win = int(0.03 * fs)
-    envolvente = np.convolve(cuadrado, np.ones(n_win) / n_win, mode='same')
-
-    # 4. Umbral móvil adaptativo dual (ruido vs señal)
-    distancia_min = int(0.26 * fs)  # Máximo ~230 bpm
-    
-    # Umbral por ventanas móviles de 2 segundos para tolerar cambios de amplitud
-    win_samples = int(2.0 * fs)
-    num_bloques = int(np.ceil(len(envolvente) / win_samples))
-    todos_picos = []
-
-    for b in range(num_bloques):
-        ini = b * win_samples
-        fin = min(len(envolvente), (b + 1) * win_samples)
-        segmento = envolvente[ini:fin]
+        # Densidad espectral en la banda fetal (1.8 - 3.5 Hz)
+        freqs, psd = signal.welch(comp, fs=fs, nperseg=int(min(len(comp), 4 * fs)))
+        idx_fetal = np.where((freqs >= 1.8) & (freqs <= 3.5))[0]
+        potencia_fetal = np.sum(psd[idx_fetal]) / (np.sum(psd) + 1e-8)
         
-        if len(segmento) == 0:
+        score = kurt * (1.0 + 2.5 * potencia_fetal)
+        mejores_scores.append(score)
+
+    mejor_idx = int(np.argmax(mejores_scores))
+    fecg_aislado = fuentes[:, mejor_idx]
+
+    # Corrección robusta de polaridad combinando skewness y percentiles extremos
+    # Las ondas R fetales fisiológicas deben orientarse positivamente
+    m = np.mean(fecg_aislado)
+    s = np.std(fecg_aislado) + 1e-8
+    skewness = np.mean(((fecg_aislado - m) / s) ** 3)
+    q99 = np.percentile(fecg_aislado, 99)
+    q01 = np.percentile(fecg_aislado, 1)
+
+    if skewness < -0.2 or (np.abs(q01) > 1.25 * np.abs(q99)):
+        fecg_aislado = -fecg_aislado
+
+    return fecg_aislado, fuentes, mejor_idx
+
+
+
+def detector_pan_tompkins_fetal(fecg_signal, fs=1000.0):
+    """
+    Algoritmo Pan-Tompkins optimizado con umbral adaptativo por ventanas temporales
+    para detectar la totalidad de complejos fQRS sin pérdidas por atenuación.
+    """
+    fecg_signal = np.asarray(fecg_signal, dtype=np.float64).flatten()
+    n_total = len(fecg_signal)
+
+    # 1. Filtro Pasa-Banda específico fQRS (10 - 35 Hz)
+    nyq = 0.5 * fs
+    low = 10.0 / nyq
+    high = min(35.0 / nyq, 0.99)
+    b, a = butter(2, [low, high], btype="bandpass")
+    sig_band = filtfilt(b, a, fecg_signal)
+
+    # 2. Derivada de cinco puntos (acentúa pendientes rápidas de despolarización)
+    sig_diff = np.gradient(sig_band)
+
+    # 3. Elevación al cuadrado
+    sig_sq = sig_diff ** 2
+
+    # 4. Integración por media móvil (~70 ms para feto)
+    w_len = max(1, int(0.07 * fs))
+    kernel = np.ones(w_len) / w_len
+    sig_integ = np.convolve(sig_sq, kernel, mode="same")
+
+    # 5. Detección por ventanas adaptativas de 3 segundos
+    # Período refractario fisiológico fetal: ~240 ms (frecuencia cardíaca máx ~250 bpm)
+    dist_minima = int(0.24 * fs)
+    win_size = int(3.0 * fs)
+    todos_picos_integ = []
+
+    for start in range(0, n_total, win_size):
+        end = min(start + win_size, n_total)
+        segmento = sig_integ[start:end]
+        
+        if len(segmento) < dist_minima:
             continue
             
-        umbral_local = np.percentile(segmento, 70) * 0.5 + np.mean(segmento) * 0.5
-        picos_seg, _ = signal.find_peaks(segmento, height=umbral_local, distance=distancia_min)
-        todos_picos.extend(picos_seg + ini)
-
-    picos_detectados = np.array(todos_picos, dtype=int)
-    
-    if len(picos_detectados) == 0:
-        return np.array([])
-
-    # 5. Ajuste de alineación con el pico original
-    picos_alineados = []
-    w_search = int(0.02 * fs)
-    for p in picos_detectados:
-        i_s = max(0, p - w_search)
-        i_e = min(len(canal), p + w_search)
-        idx_local = i_s + np.argmax(np.abs(canal[i_s:i_e]))
-        picos_alineados.append(idx_local)
-
-    return np.unique(np.array(picos_alineados, dtype=int))
-
-
-def extraer_fqrs_optimo(sig_cruda, fs=1000):
-    """
-    Pipeline completo: Filtrado -> Supresión Materna -> FastICA -> Pan-Tompkins Multicanal.
-    """
-    sig_filt = aplicar_filtros(sig_cruda, fs)
-    sig_sin_madre = suprimir_ecg_materno(sig_filt, fs)
-    fuentes_ica = extraer_componentes_ica(sig_sin_madre)
-
-    candidatos = []
-    for ch in range(fuentes_ica.shape[1]):
-        picos = pan_tompkins_fetal(fuentes_ica[:, ch], fs)
-        if len(picos) < 15:
-            continue
-
-        # Evaluación fisiológica de la serie RR
-        rr = np.diff(picos) / fs
-        bpm = 60.0 / np.median(rr) if len(rr) > 0 else 0
+        # Umbral dinámico adaptativo local (media + fracción del pico del segmento)
+        mediana_local = np.median(segmento)
+        max_local = np.percentile(segmento, 95)
+        umbral_local = mediana_local + 0.25 * (max_local - mediana_local)
         
-        score = 0.0
-        # Rango fisiológico normal fetal (110 - 165 bpm)
-        if 110 <= bpm <= 165:
-            score += 150.0
-        elif 95 <= bpm <= 185:
-            score += 80.0
+        picos_seg, _ = find_peaks(segmento, height=umbral_local, distance=dist_minima)
+        todos_picos_integ.extend(start + picos_seg)
 
-        # Regularidad fisiológica
-        iqr_rr = np.percentile(rr, 75) - np.percentile(rr, 25)
-        if iqr_rr < 0.08:  # Menor a 80 ms de dispersión intercuartil
-            score += 100.0
+    todos_picos_integ = sorted(list(set(todos_picos_integ)))
 
-        candidatos.append({"picos": picos, "score": score, "bpm": bpm})
+    # 6. Refinamiento en señal original para fijar la cúspide exacta de la onda R (+/- 35 ms)
+    w_search = int(0.035 * fs)
+    picos_fQRS_finales = []
 
-    if not candidatos:
-        # Respaldo: aplicar directamente sobre el canal crudo de mayor varianza
-        ch_max = np.argmax(np.var(sig_filt, axis=0))
-        return pan_tompkins_fetal(sig_filt[:, ch_max], fs)
+    for p in todos_picos_integ:
+        ini = max(0, p - w_search)
+        fin = min(n_total, p + w_search)
+        if fin > ini:
+            p_max = ini + np.argmax(fecg_signal[ini:fin])
+            picos_fQRS_finales.append(p_max)
 
-    candidatos.sort(key=lambda x: x["score"], reverse=True)
-    return candidatos[0]["picos"]
+    # Eliminar duplicados cercanos que violen el período refractario
+    picos_filtrados = []
+    for p in sorted(list(set(picos_fQRS_finales))):
+        if not picos_filtrados or (p - picos_filtrados[-1]) >= dist_minima:
+            picos_filtrados.append(p)
 
-
-def evaluar_fqrs(picos_detectados, picos_reales, fs=1000, tolerancia_ms=50):
-    if picos_reales is None or len(picos_reales) == 0:
-        return {"F1": 0.0, "TP": 0, "FP": 0, "FN": 0, "Sensibilidad": 0.0, "Precision": 0.0}
-
-    tol_muestras = int((tolerancia_ms / 1000.0) * fs)
-    picos_reales_restantes = list(picos_reales)
-    
-    tp = 0
-    fp = 0
-
-    for det in picos_detectados:
-        match_idx = -1
-        for i, ref in enumerate(picos_reales_restantes):
-            if abs(det - ref) <= tol_muestras:
-                match_idx = i
-                break
-        if match_idx != -1:
-            tp += 1
-            picos_reales_restantes.pop(match_idx)
-        else:
-            fp += 1
-
-    fn = len(picos_reales_restantes)
-    
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    sensibilidad = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = 2 * (precision * sensibilidad) / (precision + sensibilidad) if (precision + sensibilidad) > 0 else 0.0
-
-    return {
-        "TP": tp,
-        "FP": fp,
-        "FN": fn,
-        "Precision": precision * 100,
-        "Sensibilidad": sensibilidad * 100,
-        "F1": f1 * 100
-    }
+    return np.array(picos_filtrados, dtype=int)
 
 
-def evaluar_dataset_completo_cinc2013(limite=75):
-    resultados = []
-    print(f"--- Evaluando CinC 2013 Set A con Pipeline Dual ({limite} registros) ---")
+def extraer_fqrs_optimo(signals, fs=1000.0, return_intermediates=False):
+    """
+    Pipeline orquestador de extracción de complejos fQRS fetales a partir de registros multicanal.
+    1. Preprocesamiento: Filtrado pasa-banda (1-45 Hz) y Notch (50/60 Hz) para supresión de ruido.
+    2. Separación ciega de fuentes con FastICA y selección automática de componente fetal.
+    3. Detección de cúspides de ondas R fetales mediante algoritmo Pan-Tompkins adaptativo.
 
-    for i in range(1, limite + 1):
-        rec_name = f"a{i:02d}"
-        try:
-            sig_cruda, fs, fqrs_reales, _ = stream_cinc2013(rec_name)
-            picos_detectados = extraer_fqrs_optimo(sig_cruda, fs)
-            metricas = evaluar_fqrs(picos_detectados, fqrs_reales, fs)
-            
-            resultados.append({
-                "Registro": rec_name,
-                "Picos_Reales": len(fqrs_reales) if fqrs_reales is not None else 0,
-                "Picos_Detectados": len(picos_detectados),
-                "Sensibilidad": metricas["Sensibilidad"],
-                "Precision": metricas["Precision"],
-                "F1": metricas["F1"]
-            })
-            print(f"[{i:02d}/{limite}] {rec_name} -> F1: {metricas['F1']:.2f}% | Sens: {metricas['Sensibilidad']:.2f}% | Prec: {metricas['Precision']:.2f}%")
-        except Exception as e:
-            print(f"[{i:02d}/{limite}] {rec_name} -> Error: {e}")
+    Parámetros:
+        signals (np.ndarray): Matriz de señales multicanal (N_muestras, N_canales).
+        fs (float): Frecuencia de muestreo en Hz (por defecto 1000 Hz).
+        return_intermediates (bool): Si es True, retorna además (fecg_aislado, fuentes, idx_fetal, sig_filtrada).
 
-    df_res = pd.DataFrame(resultados)
-    
-    print("\n=======================================================")
-    print("           REPORTE GENERAL DE DESEMPEÑO fQRS          ")
-    print("=======================================================")
-    print(f"Registros evaluados con éxito : {len(df_res)}")
-    print(f"Sensibilidad Promedio         : {df_res['Sensibilidad'].mean():.2f}%")
-    print(f"Precisión Promedio            : {df_res['Precision'].mean():.2f}%")
-    print(f"F1-Score Global Promedio      : {df_res['F1'].mean():.2f}%")
-    print(f"Registros con F1 >= 90%       : {(df_res['F1'] >= 90.0).sum()} / {len(df_res)}")
-    print("=======================================================")
-    
-    return df_res
+    Retorna:
+        np.ndarray: Índices muestrales de los picos fQRS detectados.
+        (Opcional si return_intermediates=True): (picos, fecg_aislado, fuentes, idx_fetal, sig_filtrada)
+    """
+    signals = np.asarray(signals, dtype=np.float64)
+    if len(signals) == 0:
+        picos_vacio = np.array([], dtype=int)
+        if return_intermediates:
+            return picos_vacio, np.array([]), np.array([]), -1, np.array([])
+        return picos_vacio
 
+    # 1. Preprocesamiento multicanal (deriva de línea base y filtrado espectral)
+    sig_filtrada = preprocesar_senal_multicanal(signals, fs=fs, aplicar_notch=True)
 
-if __name__ == "__main__":
-    df_metricas = evaluar_dataset_completo_cinc2013(limite=75)
+    # 2. Cancelación adaptativa de complejos maternos (mQRS) para liberar la fuente fetal
+    sig_sin_materno, picos_maternos = cancelar_complejos_maternos(sig_filtrada, fs=fs)
+
+    # 3. Aislamiento de la componente fetal por FastICA (sobre señal con mQRS suprimido)
+    fecg_aislado, fuentes, idx_fetal = aislar_componente_fecg(sig_sin_materno, fs=fs)
+
+    # 4. Detección Pan-Tompkins adaptativo sobre la componente fetal aislada
+    picos_fqrs = detector_pan_tompkins_fetal(fecg_aislado, fs=fs)
+
+    if return_intermediates:
+        return picos_fqrs, fecg_aislado, fuentes, idx_fetal, sig_filtrada
+    return picos_fqrs
+
