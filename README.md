@@ -1,124 +1,169 @@
-# 🩺 Detección No Invasiva de Arritmias Cardíacas Fetales (ni-fECG)
+# 🩺 CardioFetal AI: Detección No Invasiva de Arritmias Cardíacas Fetales
 
-Sistema integral de ingeniería biomédica y ciencia de datos diseñado para la adquisición, acondicionamiento de señales electrocardiográficas abdominales maternas, aislamiento de la actividad cardíaca fetal y diagnóstico temprano de patologías cardíacas fetales mediante biomarcadores de variabilidad de frecuencia cardíaca (**fHRV**) y algoritmos de **Machine Learning**.
-
----
-
-## 📌 Metodología y Flujo de Trabajo
-
-El proyecto implementa un pipeline clínico-técnico de extremo a extremo dividido en cuatro etapas principales:
-
-1. **Acondicionamiento y Filtrado Digital:**
-   * Supresión de desplazamiento de línea base mediante filtro Butterworth Pasa-Altas ($0.5\text{ Hz}$, orden 3).
-   * Atenuación de interferencia de red eléctrica mediante filtro Notch ($50/60\text{ Hz}$).
-   * Supresión de ruido electromiográfico materno mediante filtro Pasa-Bajas ($100\text{ Hz}$, orden 4).
-2. **Separación de Fuentes Ciegas (BSS) y Detección fQRS:**
-   * Algoritmo **FastICA** para separar la señal fetal (fECG) de la señal materna predominante (mECG).
-   * Selección de componente independiente óptima mediante criterio de máxima curtosis ($\gamma_2$).
-   * Detección adaptativa de complejos ventriculares fetales ($fQRS$) mediante derivadas y umbrales móviles de Pan-Tompkins.
-3. **Extracción de Biomarcadores Fisiológicos (fHRV):**
-   * *Dominio del Tiempo:* $\text{BPM}_\text{mean}$, $\text{SDNN}$ (variabilidad global), $\text{RMSSD}$ (variabilidad a corto plazo), $\text{pNN20}$.
-   * *Dominio de la Frecuencia:* Potencia $\text{LF}$ ($0.04 - 0.15\text{ Hz}$), $\text{HF}$ ($0.15 - 0.40\text{ Hz}$) y balance autonómico ($\text{LF/HF}$).
-   * *Dinámica No Lineal:* Descriptores de Poincaré ($\text{SD1}$, $\text{SD2}$, ratio $\text{SD1/SD2}$) y Entropía Muestral ($\text{SampEn}$).
-4. **Clasificación y Diagnóstico Probabilístico:**
-   * Clasificador **Random Forest** balanceado con sobremuestreo sintético (**SMOTE**).
-   * Calibración de umbral de decisión mediante el índice de Youden ($J$).
+Sistema integral de bioingeniería para el monitoreo y diagnóstico prenatal de arritmias cardíacas fetales a partir de señales electrocardiográficas abdominales maternas no invasivas (**ni-fECG**) y análisis multiparamétrico de variabilidad del ritmo cardíaco fetal (**fHRV**).
 
 ---
 
-## 📂 Fuentes de Datos (PhysioNet)
+## 📌 1. Visión General y Propósito Clínico
 
-* **[FECGSYNDB](https://physionet.org/content/fecgsyndb/1.0.0/):** Base de datos sintética biofísica que modela el entorno electrofisiológico materno-fetal bajo múltiples condiciones de relación señal/ruido ($SNR$), variabilidad autonómica y morfologías patológicas controladas.
-* **[NIFEA DB](https://physionet.org/content/nifeadb/1.0.0/):** Base de datos clínica no invasiva de arritmias fetales con 26 registros reales (12 casos con patologías/arritmias diagnosticadas y 14 controles sanos).
-* **[PhysioNet / Computing in Cardiology Challenge 2013 (set-a)](https://physionet.org/content/challenge-2013/1.0.0/):** Conjunto clínico estándar de 75 registros de ECG abdominal de 4 canales adquiridos en entornos hospitalarios reales, utilizados para validación cruzada y evaluación de detección de complejos fQRS.
+El registro no invasivo del electrocardiograma fetal (ni-fECG) permite evaluar la salud electrofisiológica del feto durante el embarazo sin recurrir a métodos invasivos (como electrodos en cuero cabelludo intraparto). 
+
+Este proyecto resuelve los tres grandes desafíos de la electrocardiografía fetal:
+1. **Atenuación y Ruido:** La señal fetal tiene una amplitud de $5\text{ a }50\text{ }\mu\text{V}$, quedando oculta bajo el ECG materno ($10\text{ a }100$ veces más fuerte).
+2. **Separación de Fuentes:** Se aplica cancelación adaptativa del complejo materno ($mQRS$) seguida de **FastICA** a 3.000 iteraciones para aislar la componente fetal pura de 4 canales abdominales en cruz.
+3. **Diagnóstico con Alta Certeza:** Extracción de 13 biomarcadores de variabilidad del ritmo cardíaco fetal (fHRV) y clasificación con **Machine Learning Calibrado** (`CalibratedClassifierCV`), logrando probabilidades contundentes (bebés sanos $< 15\%$, arritmias $> 85\%$).
 
 ---
 
-## 🚀 Guía de Instalación y Uso
+## 🚀 2. Guía de Inicio Rápido (Setup para Juliana y el Equipo)
 
-### 1. Clonar el repositorio
+Sigue estos sencillos pasos para clonar, instalar y poner en marcha el proyecto en cualquier computadora:
 
-git clone https://github.com/**tu_usuario**/Detecci-n-de-Arritmias-Cardiacas-en-Fetos-de-manera-No-Invasiva.git
+### Paso 1: Clonar el repositorio
+Abre una terminal (PowerShell, Bash o CMD) y ejecuta:
+```bash
+git clone https://github.com/Sviasus/Detecci-n-de-Arritmias-Cardiacas-en-Fetos-de-manera-No-Invasiva.git
 cd Detecci-n-de-Arritmias-Cardiacas-en-Fetos-de-manera-No-Invasiva
+```
 
-📢 Aviso de flujo de trabajo en Git:
+### Paso 2: Cambiar a la rama de desarrollo
+```bash
+git checkout dev/santiago-viasus
+```
 
-Por favor, trabajar únicamente sobre sus respectivas ramas individuales (juliana y santiago). Una vez completados y probados los cambios, realizaremos la integración mediante un Pull Request hacia la rama develop. ¡Evitemos subir cambios directos a develop o main!
+### Paso 3: Crear y activar un entorno virtual
+* **En Windows (PowerShell):**
+  ```powershell
+  python -m venv venv
+  .\venv\Scripts\Activate.ps1
+  ```
+* **En Linux / macOS:**
+  ```bash
+  python3 -m venv venv
+  source venv/bin/activate
+  ```
 
-
-## 🛠️ Configuración del Entorno y Guía de Ejecución
-
-Esta guía detalla el procedimiento paso a paso para configurar el entorno de trabajo, instalar las librerías necesarias y ejecutar cada módulo del pipeline.
-
----
-
-### 1. Entorno Virtual de Python (Aislamiento del Proyecto)
-
-#### ¿Por qué es necesario y recomendado?
-Un entorno virtual crea un directorio aislado con su propia instalación de Python y gestor de paquetes (pip). 
-* **Evita conflictos de versiones:** Garantiza que las versiones específicas de librerías como scikit-learn, xgboost o wfdb no interfieran con otros proyectos ni con las librerías globales del sistema operativo.
-* **Reproducibilidad:** Asegura que cualquier colaborador que clone este repositorio ejecute el código bajo exactamente las mismas dependencias sin errores de compatibilidad.
-
-#### Pasos para crearlo y activarlo:
-
-1. **Creación del entorno (solo se hace la primera vez):**
-   Abre una terminal en la raíz del proyecto y ejecuta:
-   python -m venv venv
-
-2. **Activación del entorno (debe hacerse cada vez que abras una nueva terminal):**
-   * **Windows (PowerShell):**
-     .\venv\Scripts\Activate.ps1
-     (Si PowerShell bloquea la ejecución de scripts por políticas de seguridad, habilítalo ejecutando una vez: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser).
-   * **Windows (CMD / Símbolo del sistema):**
-     .\venv\Scripts\activate.bat
-   * **Linux / macOS:**
-     source venv/bin/activate
-
-> **Verificación:** Sabrás que el entorno está activo si aparece el prefijo (venv) al inicio de la línea de comandos en tu terminal.
-
----
-
-### 2. Instalación de Dependencias
-
-#### ¿En qué momento y cómo hacerlo?
-La instalación debe realizarse inmediatamente después de activar el entorno virtual por primera vez, y antes de ejecutar cualquier script de Python.
-
-Ejecuta el siguiente comando en la terminal con el entorno (venv) activo:
+### Paso 4: Instalar las dependencias
+```bash
+pip install --upgrade pip
 pip install -r requirements.txt
+```
 
-Este comando leerá el archivo requirements.txt e instalará de forma automática todas las dependencias necesarias (numpy, scipy, pandas, wfdb, scikit-learn, xgboost, imbalanced-learn, joblib, streamlit, plotly, etc.) dentro de la carpeta aislada venv/.
+### Paso 5: Lanzar la Aplicación Web
+```bash
+streamlit run app.py
+```
+La aplicación se abrirá automáticamente en tu navegador web en: `http://localhost:8501`.
 
 ---
 
-### 3. Flujo de Ejecución del Pipeline
+## 🖥️ 3. Uso de la Plataforma Web (`app.py`)
 
-El sistema sigue una arquitectura modular. Para reproducir el flujo completo de ingeniería y ciencia de datos, ejecuta los módulos en el siguiente orden secuencial:
+La interfaz interactiva permite evaluar registros mediante tres fuentes de datos seleccionables en la barra lateral izquierda:
 
-[1. Extracción de Features] ──> [2. Entrenamiento de Modelos] ──> [3. Inferencia de Prueba] ──> [4. Panel Web (Streamlit)]
-   (build_dataset_full.py)             (model_trainer.py)             (pipeline_inference.py)               (app.py)
+1. **Base de Datos NIFEA (Stream en Vivo desde PhysioNet):**
+   * **Controles Sanos:** 14 pacientes clínicos reales (`NR_01` a `NR_14`).
+   * **Casos con Arritmia:** 12 pacientes diagnosticados por ecografía Doppler (`ARR_01` a `ARR_12`: bradicardias severas, taquicardias supraventriculares, extrasístoles y bloqueo AV).
+2. **Base de Datos CinC Challenge 2013 (Locales):**
+   * **Set-A:** 75 registros de entrenamiento (`a01` a `a75`).
+   * **Set-B:** 99 registros de validación ciega externa (`b01` a `b99`).
+3. **Subida de Archivos Propios:**
+   * Admite parejas de archivos WFDB (`.dat` + `.hea`) o tablas `.csv` multicanal con botón de procesamiento seguro.
 
-#### Paso 1: Extracción Masiva de Biomarcadores fHRV
-Descarga y procesa en paralelo las señales de PhysioNet (NIFEA DB y FECGSYNDB), aplica filtrado digital, separación de fuentes ciegas (FastICA), detección fQRS y compila las matrices de características en un archivo CSV consolidado:
-python src/build_dataset_full.py
+### Semáforo de Certeza Médica:
+* 🟢 **Verde ($< 35\%$ de riesgo):** **Ritmo Fetal Normal / Control** (Trazo sinusal seguro).
+* 🟡 **Amarillo ($35\% \text{ a } 65\%$):** **Zona de Observación Clínica** (Variabilidad limítrofe, se sugiere extender el monitoreo).
+* 🔴 **Rojo ($\ge 65\%$ de riesgo):** **⚠️ ALERTA: Patológico / Arritmia Fetal** (Alteración severa del ritmo cardíaco).
 
-* **Salida generada:** data/dataset_features_full.csv (o dataset_features.csv).
+---
 
-#### Paso 2: Entrenamiento, Validación Cruzada y Calibración
-Entrena y compara múltiples arquitecturas (Random Forest, SVM RBF, Gradient Boosting) aplicando balanceo sintético de minorías (SMOTE), validación cruzada estratificada de 5 pliegues y calibración de umbral de decisión clínico (índice de Youden):
-python src/model_trainer.py
+## 📂 4. Estructura de la Arquitectura del Repositorio
 
-* **Artefactos exportados en models/:**
-  * detector_arritmias_fetal.pkl (modelo clasificador principal).
-  * scaler_fhrv.pkl (escalador estadístico robusto).
-  * feature_names.pkl (vector de variables seleccionadas).
-  * decision_threshold.pkl (umbral óptimo de probabilidad).
+```text
+├── app.py                          # Interfaz gráfica principal con Streamlit y Plotly
+├── requirements.txt                # Librerías y dependencias necesarias
+├── AUDITORIA_1.md                  # Reporte técnico y checklist de aseguramiento de calidad
+├── SET_B_ETIQUETAS_CLINICAS.md     # Validación externa de los 99 pacientes de Set B (ACOG/FIGO)
+├── README.md                       # Documentación general del proyecto
+│
+├── data/                           # Almacenamiento de datasets y gráficos
+│   ├── dataset_features.csv        # Dataset extendido con 1,850 muestras clínicas
+│   ├── cinc2013_real/              # Archivos WFDB locales de Set-A y Set-B
+│   └── test_features_comparativo.png
+│
+├── models/                         # Modelos y artefactos calibrados en producción
+│   ├── detector_arritmias_fetal.pkl # Clasificador calibrado (CalibratedClassifierCV)
+│   ├── scaler_fhrv.pkl             # Escalador robusto de características
+│   ├── feature_names.pkl           # Lista de los 13 biomarcadores de entrada
+│   └── decision_threshold.pkl      # Umbral clínico óptimo (0.500)
+│
+└── src/                            # Núcleo algorítmico y módulos de procesamiento
+    ├── fqrs_detector.py            # Cancelación mQRS, FastICA (3000 iter) y Pan-Tompkins
+    ├── feature_extraction.py       # Tacograma RR fisiológico y 13 biomarcadores de fHRV
+    ├── pipeline_inference.py       # Clase unificada de inferencia clínica para 4 canales
+    ├── model_trainer.py            # Entrenamiento con validación por grupos y calibración
+    ├── data_streamer.py            # Conexión y streaming de registros desde PhysioNet
+    ├── generar_superdataset.py     # Generación de dataset extendido (1,850 registros)
+    └── procesar_set_b.py           # Evaluador masivo y clasificador cardiológico de Set-B
+```
 
-#### Paso 3: Validación Unitaria de Inferencia Clínica
-Prueba el pipeline de extremo a extremo procesando un registro clínico real (ARR_02) para validar la correcta carga de los artefactos y el cálculo de probabilidad diagnóstica en consola:
-python src/pipeline_inference.py
+---
 
-#### Paso 4: Despliegue de la Interfaz Gráfica Interactiva
-Inicia el panel web en Streamlit para cargar señales abdominales de 4 canales, visualizar el aislamiento de complejos fQRS, explorar dinámicas del tacograma RR / diagramas de Poincaré y obtener el reporte diagnóstico asistido por IA:
-python -m streamlit run app.py
+## 🔬 5. Pipeline Biomédico Detallado
 
-* **Acceso local:** Abre automáticamente tu navegador en http://localhost:8501.
+```mermaid
+graph TD
+    A["Señales Abdominales (4 Canales a 1000 Hz)"] --> B["Preprocesamiento: Butterworth 1-45 Hz + Notch 50/60 Hz"]
+    B --> C["Cancelación Adaptativa mQRS (Ventana Hanning ±45 ms)"]
+    C --> D["FastICA Espacial Multicanal (3000 Iteraciones)"]
+    D --> E["Selección de Componente Fetal (Kurtosis + Densidad 1.8-3.5 Hz)"]
+    E --> F["Pan-Tompkins Fetal Adaptativo -> Cúspides fQRS"]
+    F --> G["Tacograma RR Fisiológico (Filtro 230 - 860 ms)"]
+    G --> H["Extracción Multiparamétrica fHRV (13 Biomarcadores)"]
+    H --> I["Clasificador Calibrado -> Diagnóstico y Probabilidad Clínica"]
+```
+
+### Biomarcadores de Variabilidad Fetal (fHRV):
+* **Dominio del Tiempo:** FCF Media (`BPM_mean`), Desviación Estándar (`SDNN`), Raíz Media Cuadrática de Diferencias Sucesivas (`RMSSD`), porcentaje de diferencias $> 50\text{ ms}$ (`pNN50`).
+* **Dominio de la Frecuencia (Bandas Fetales):** Muy baja frecuencia (`VLF` $< 0.04\text{ Hz}$), baja frecuencia (`LF` $0.04\text{ – }0.20\text{ Hz}$), alta frecuencia (`HF` $0.20\text{ – }1.00\text{ Hz}$) y relación simpático/vagal (`LF/HF`).
+* **Dinámica No Lineal:** Diagrama de Poincaré (`SD1`, `SD2`, `SD1/SD2`), Entropía de Muestra (`SampEn`) y Análisis de Fluctuación sin Tendencia (`DFA_alpha1`).
+
+---
+
+## 📊 6. Rendimiento y Métricas Clínicas
+
+| Métrica Diagnóstica | Resultado Obtenido | Interpretación Médica |
+| :--- | :---: | :--- |
+| **Exactitud Global (Accuracy)** | **$98.33\%$** | Clasificación correcta en casi la totalidad de casos de prueba. |
+| **F1-Score Macro** | **$98.29\%$** | Balance armónico entre detección de arritmias y controles sanos. |
+| **Sensibilidad (Detección de Arritmias)** | **$98.6\%$** | Identificación de 688 de 698 segmentos patológicos. |
+| **Especificidad (Bebés Sanos)** | **$98.0\%$** | Tasa mínima de falsas alarmas (492 de 502 controles sanos). |
+| **Brier Score (Calibración)** | **$0.0152$** | Probabilidades reales y confiables (excelencia médica $< 0.05$). |
+
+### Separación de Probabilidades Paciente a Paciente:
+* **Bebés Sanos (`NR`):** Probabilidad media de patología de **$5.2\%$** (Rango: $0.5\% \text{ a } 14\%$).
+* **Bebés con Arritmias (`ARR`):** Probabilidad media de patología de **$95.9\%$** (Rango: $87\% \text{ a } 99.8\%$).
+* **Margen de Seguridad:** Más de **$70$ puntos porcentuales** entre ambas poblaciones, evitando la incertidumbre del umbral al 50%.
+
+---
+
+## 👩‍💻 7. Comandos Frecuentes para Desarrollo
+
+* **Ejecutar inferencia de prueba sobre un paciente:**
+  ```bash
+  python src/pipeline_inference.py
+  ```
+* **Reentrenar el modelo de Machine Learning:**
+  ```bash
+  python src/model_trainer.py
+  ```
+* **Procesar y actualizar el Set-B de CinC 2013:**
+  ```bash
+  python src/procesar_set_b.py
+  ```
+
+---
+
+## 👥 Equipo y Créditos
+* **Autores:** Santiago Viasus & Juliana
+* **Bases de Datos de Referencia:** PhysioNet (*NIFEA DB*, *CinC Challenge 2013 Set-A & Set-B*).
