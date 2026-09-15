@@ -23,6 +23,16 @@ src/__pycache__/
 data/cinc2013/
 data/fecgsyndb/
 
+# Muestras de prueba incluidas en el repositorio para despliegue inmediato
+!data/cinc2013_real/set-a/a01.dat
+!data/cinc2013_real/set-a/a01.hea
+!data/cinc2013_real/set-a/a11.dat
+!data/cinc2013_real/set-a/a11.hea
+!data/cinc2013_real/set-b/b01.dat
+!data/cinc2013_real/set-b/b01.hea
+!data/cinc2013_real/set-b/b11.dat
+!data/cinc2013_real/set-b/b11.hea
+
 # Archivos de sistema
 .DS_Store
 Thumbs.db
