@@ -1,9 +1,10 @@
 import numpy as np
-import pandas as pd
 from scipy import signal
 
+from scipy.integrate import trapezoid
 
-def calcular_tacograma_rr(picos_indices, fs=1000):
+
+def calcular_tacograma_rr(picos_indices, fs=1000.0):
     """
     Convierte picos fQRS en tacograma RR respetando la fisiología fetal y preservando arritmias:
     - Rango fisiológico fetal ampliado: 230 ms a 860 ms (equivalente a 70 a 260 bpm).
@@ -72,7 +73,7 @@ def extraer_features_frecuenciales(rr_ms, fs_interp=4.0):
     if len(t_interp) < 8:
         return {"VLF": 0.0, "LF": 0.0, "HF": 0.0, "LF_HF_ratio": 0.0}
 
-    rr_interp = np.interp(t_interp, tiempo_acum, rr_ms)
+    rr_interp = np.asarray(np.interp(t_interp, tiempo_acum, rr_ms), dtype=np.float64)
     rr_detrend = rr_interp - np.mean(rr_interp)
 
     nperseg = min(len(rr_detrend), int(fs_interp * 64))
@@ -86,20 +87,16 @@ def extraer_features_frecuenciales(rr_ms, fs_interp=4.0):
     lf_band = (freqs >= 0.04) & (freqs < 0.20)
     hf_band = (freqs >= 0.20) & (freqs < 1.00)
 
-    # Integración trapezoidal robusta y compatible con scipy moderno
+    # Integración trapezoidal robusta y compatible con scipy/numpy moderno
     def _integrar(y_vals, x_vals):
-        if not np.any(y_vals):
+        if len(y_vals) < 2 or not np.any(y_vals):
             return 0.0
-        try:
-            from scipy.integrate import trapezoid
-            return float(trapezoid(y_vals, x_vals))
-        except ImportError:
-            return float(np.trapz(y_vals, x_vals))
+        return float(trapezoid(y_vals, x=x_vals))
 
     vlf_pow = _integrar(psd[vlf_band], freqs[vlf_band])
     lf_pow = _integrar(psd[lf_band], freqs[lf_band])
     hf_pow = _integrar(psd[hf_band], freqs[hf_band])
-    lf_hf = float(lf_pow / (hf_pow + 1e-8)) if hf_pow > 0 else 0.0
+    lf_hf = (lf_pow / (hf_pow + 1e-8)) if hf_pow > 0 else 0.0
 
     return {
         "VLF": vlf_pow,
@@ -224,7 +221,7 @@ def extraer_features_no_lineales(rr_ms):
     }
 
 
-def extraer_vector_caracteristicas_completo(picos_indices, fs=1000):
+def extraer_vector_caracteristicas_completo(picos_indices, fs=1000.0):
     """
     Calcula el vector consolidado de características fHRV.
     """
