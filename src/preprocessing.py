@@ -43,11 +43,42 @@ def normalizar_zscore(senal):
     return senal - np.nanmean(senal)
 
 
+def imputar_nans_multicanal(signals):
+    """
+    Imputa valores faltantes (NaN) en señales biomédicas multicanal:
+    - Utiliza interpolación lineal para tramos con pérdidas de paquetes o artefactos de electrodo.
+    - Rellena bordes si existen NaNs al inicio o final del registro.
+    - Si un canal está completamente vacío (todo NaN), lo rellena con ceros.
+    """
+    signals = np.asarray(signals, dtype=np.float64)
+    if not np.isnan(signals).any():
+        return signals
+        
+    signals_clean = np.copy(signals)
+    n_samples, n_channels = signals_clean.shape
+    for ch in range(n_channels):
+        col = signals_clean[:, ch]
+        nans = np.isnan(col)
+        if not np.any(nans):
+            continue
+        if np.all(nans):
+            signals_clean[:, ch] = 0.0
+            continue
+        valid_idx = np.where(~nans)[0]
+        nan_idx = np.where(nans)[0]
+        col[nan_idx] = np.interp(nan_idx, valid_idx, col[valid_idx])
+        signals_clean[:, ch] = col
+        
+    return signals_clean
+
+
 def preprocesar_senal_multicanal(signals, fs=1000.0, aplicar_notch=True, normalizar=False):
     signals = np.asarray(signals, dtype=np.float64)
     if signals.ndim == 1:
         signals = signals[:, np.newaxis]
         
+    # Limpieza previa de muestras inválidas o saturadas (NaNs de sensores)
+    signals = imputar_nans_multicanal(signals)
     n_samples, n_channels = signals.shape
     signals_proc = np.zeros_like(signals)
     

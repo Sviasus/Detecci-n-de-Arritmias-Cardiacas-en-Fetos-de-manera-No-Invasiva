@@ -8,6 +8,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import wfdb
+from scipy import signal
 
 # Configuración de rutas internas
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -116,6 +117,78 @@ def cargar_artefactos():
 
 modelo, scaler, feature_names, default_threshold = cargar_artefactos()
 
+# ----------------- FUNCIONES DE CARGA Y CACHÉ DE DATOS -----------------
+@st.cache_data(show_spinner="Cargando registro biomédico CinC 2013...")
+def cargar_registro_cinc(subconjunto: str, registro_id: str):
+    """
+    Carga un registro de CinC Challenge 2013:
+    1. Si existe localmente en data/cinc2013_real/..., lo lee directo del disco.
+    2. Si no existe en disco (ej. en Streamlit Cloud), lo descarga en streaming
+       directamente desde PhysioNet y lo mantiene en memoria caché.
+    """
+    subfolder = "set-a" if "Set-A" in subconjunto else "set-b"
+    pn_dir = "challenge-2013/1.0.0/set-a" if "Set-A" in subconjunto else "challenge-2013/1.0.0/set-b"
+    
+    # Búsqueda en rutas locales del proyecto
+    rutas_candidatas = [
+        os.path.join(CURRENT_DIR, "data", "cinc2013_real", subfolder, registro_id),
+        os.path.join(CURRENT_DIR, "data", "cinc2013", subfolder, registro_id)
+    ]
+    for ruta in rutas_candidatas:
+        if os.path.exists(f"{ruta}.hea"):
+            rec = wfdb.rdrecord(ruta)
+            p_sig = getattr(rec, "p_signal", None)
+            rec_fs = float(getattr(rec, "fs", 1000.0) or 1000.0)
+            if p_sig is not None:
+                return np.array(p_sig, dtype=np.float64, copy=True), rec_fs, "Disco Local"
+
+    # Si no existe localmente (ej: Streamlit Cloud), descargar vía streaming oficial PhysioNet
+    rec = wfdb.rdrecord(registro_id, pn_dir=pn_dir)
+    p_sig = getattr(rec, "p_signal", None)
+    rec_fs = float(getattr(rec, "fs", 1000.0) or 1000.0)
+    if p_sig is None:
+        raise ValueError(f"No se pudo extraer señal del registro {registro_id}")
+    return np.array(p_sig, dtype=np.float64, copy=True), rec_fs, "PhysioNet Cloud"
+
+
+@st.cache_data(show_spinner="Descargando registro clínico NIFEA desde PhysioNet...")
+def cargar_registro_nifea(registro_id: str, duracion_max_seg: float = 60.0):
+    """
+    Carga y cachea registro de NIFEA DB desde PhysioNet.
+    Descarga una ventana óptima de señal (60s) para respuesta ágil y estabilidad de memoria en la nube.
+    """
+    hdr = wfdb.rdheader(registro_id, pn_dir="nifeadb/1.0.0")
+    fs_val = getattr(hdr, "fs", 1000.0) or 1000.0
+    fs_hdr = float(fs_val)
+    sampto = int(duracion_max_seg * fs_hdr)
+    
+    rec = wfdb.rdrecord(registro_id, pn_dir="nifeadb/1.0.0", sampto=sampto)
+    p_sig = getattr(rec, "p_signal", None)
+    rec_fs = float(getattr(rec, "fs", 1000.0) or 1000.0)
+    sig_names = list(getattr(rec, "sig_name", []) or [])
+    if p_sig is None:
+        raise ValueError(f"No se pudo leer señal de {registro_id}")
+        
+    p_sig_mat = np.asarray(p_sig, dtype=np.float64)
+    # Excluir canal torácico y tomar los primeros 4 abdominales
+    indices_abd = [
+        i for i, name in enumerate(sig_names)
+        if not ('tho' in str(name).lower() or 'chest' in str(name).lower())
+    ]
+    indices_4ch = indices_abd[:4] if len(indices_abd) >= 4 else list(range(min(4, p_sig_mat.shape[1])))
+    signal_4ch = p_sig_mat[:, indices_4ch]
+    
+    target_fs = 1000.0
+    if rec_fs != target_fs and rec_fs > 0:
+        num_muestras = int(len(signal_4ch) * (target_fs / rec_fs))
+        signal_4ch = signal.resample(signal_4ch, num_muestras)
+        fs_final = target_fs
+    else:
+        fs_final = rec_fs
+        
+    return np.array(signal_4ch, dtype=np.float64, copy=True), fs_final, "PhysioNet Cloud"
+
+
 # ----------------- BARRA LATERAL: ENTRADA DE DATOS -----------------
 st.sidebar.title("🩺 Control de Análisis")
 st.sidebar.markdown("---")
@@ -123,53 +196,46 @@ st.sidebar.markdown("---")
 modo_entrada = st.sidebar.radio(
     "Fuente de datos:",
     [
-        "Base de datos NIFEA (Stream)",
         "Base de datos CinC 2013 (Set-A y Set-B)",
+        "Base de datos NIFEA (Stream)",
         "Subir archivo propio (WFDB / CSV)"
-    ]
+    ],
+    index=0
 )
 
 sig_raw = None
 fs = 1000.0
 nombre_muestra = ""
 
-if modo_entrada == "Base de datos NIFEA (Stream)":
+if modo_entrada == "Base de datos CinC 2013 (Set-A y Set-B)":
+    cinc_set_tipo = st.sidebar.radio("Subconjunto CinC:", ["Set-A (a01 - a75)", "Set-B (b01 - b99)"])
+    
+    if "Set-A" in cinc_set_tipo:
+        registros_cinc = [f"a{i:02d}" for i in range(1, 76)]
+        registro_cinc_sel = st.sidebar.selectbox("Registro CinC 2013 (Set-A):", registros_cinc, index=0)
+    else:
+        registros_cinc = [f"b{i:02d}" for i in range(1, 100)]
+        registro_cinc_sel = st.sidebar.selectbox("Registro CinC 2013 (Set-B):", registros_cinc, index=0)
+
+    nombre_muestra = f"CinC 2013 - {registro_cinc_sel}"
+    try:
+        sig_raw, fs, origen_dato = cargar_registro_cinc(cinc_set_tipo, registro_cinc_sel)
+        st.sidebar.success(f"Registro `{registro_cinc_sel}` listo ({len(sig_raw)/fs:.0f}s, {fs:.0f} Hz) [{origen_dato}].")
+    except Exception as e:
+        st.sidebar.error(f"Error cargando registro CinC: {e}")
+
+elif modo_entrada == "Base de datos NIFEA (Stream)":
     registros_nifea = (
         [f"NR_{i:02d}" for i in range(1, 15)] +
         [f"ARR_{i:02d}" for i in range(1, 13)]
     )
     registro_sel = st.sidebar.selectbox("Registro Fetal (NIFEA DB):", registros_nifea, index=0)
-    nombre_muestra = registro_sel
+    nombre_muestra = f"NIFEA DB - {registro_sel}"
     try:
-        sig_raw, fs, header = stream_nifeadb(registro_sel)
+        sig_raw, fs, origen_dato = cargar_registro_nifea(registro_sel)
+        st.sidebar.success(f"Registro `{registro_sel}` listo ({len(sig_raw)/fs:.0f}s, {fs:.0f} Hz) [{origen_dato}].")
     except Exception as e:
-        st.sidebar.error(f"Error descargando registro: {e}")
-
-elif modo_entrada == "Base de datos CinC 2013 (Set-A y Set-B)":
-    cinc_set_tipo = st.sidebar.radio("Subconjunto CinC:", ["Set-A (a01 - a75)", "Set-B (b01 - b99)"])
-    
-    if "Set-A" in cinc_set_tipo:
-        registros_cinc = [f"a{i:02d}" for i in range(1, 76)]
-        registro_cinc_sel = st.sidebar.selectbox("Registro CinC 2013 (Set-A):", registros_cinc, index=10)
-        dir_cinc_activo = os.path.join(CURRENT_DIR, "data", "cinc2013_real", "set-a")
-    else:
-        registros_cinc = [f"b{i:02d}" for i in range(1, 100)]
-        registro_cinc_sel = st.sidebar.selectbox("Registro CinC 2013 (Set-B):", registros_cinc, index=0)
-        dir_cinc_activo = os.path.join(CURRENT_DIR, "data", "cinc2013_real", "set-b")
-
-    nombre_muestra = f"CinC 2013 - {registro_cinc_sel}"
-    path_rec = os.path.join(dir_cinc_activo, registro_cinc_sel)
-    
-    if os.path.exists(f"{path_rec}.hea"):
-        try:
-            rec = wfdb.rdrecord(path_rec)
-            sig_raw = np.array(rec.p_signal, dtype=np.float64, copy=True)
-            fs = float(rec.fs)
-            st.sidebar.success(f"Registro `{registro_cinc_sel}` cargado ({len(sig_raw)/fs:.0f}s, {fs:.0f} Hz).")
-        except Exception as e:
-            st.sidebar.error(f"Error leyendo registro CinC: {e}")
-    else:
-        st.sidebar.warning(f"No se encontró `{registro_cinc_sel}.hea`. Ejecuta la descarga previa de Set-B.")
+        st.sidebar.error(f"Error descargando registro NIFEA: {e}")
 
 else:
     st.sidebar.markdown("**Carga de Archivos Externos**")
@@ -208,9 +274,12 @@ else:
                         f_out.write(hea_file.getbuffer())
                     try:
                         record = wfdb.rdrecord(os.path.join(upload_tmp, base_name))
-                        st.session_state["cached_sig_raw"] = np.array(record.p_signal, dtype=np.float64, copy=True)
-                        st.session_state["cached_fs"] = float(record.fs)
-                        st.session_state["cached_name"] = base_name
+                        p_sig_up = getattr(record, "p_signal", None)
+                        fs_up = float(getattr(record, "fs", 1000.0) or 1000.0)
+                        if p_sig_up is not None:
+                            st.session_state["cached_sig_raw"] = np.array(p_sig_up, dtype=np.float64, copy=True)
+                            st.session_state["cached_fs"] = fs_up
+                            st.session_state["cached_name"] = base_name
                     except Exception as e:
                         st.sidebar.error(f"Error interpretando WFDB: {e}")
 
@@ -250,9 +319,10 @@ if sig_raw is not None:
 
         st.info(f"📋 **Muestra Activa:** `{nombre_muestra}` | **Duración Total:** `{duracion_sec:.1f} s` | **Frecuencia de Muestreo:** `{fs} Hz` | **Complejos fQRS Detectados:** `{len(fqrs_peaks)}`")
 
-        if modelo is not None and features_dict is not None:
+        if modelo is not None and scaler is not None and feature_names is not None and features_dict is not None:
             df_feat = pd.DataFrame([features_dict])[feature_names]
-            X_scaled = scaler.transform(df_feat.values)
+            X_mat = np.asarray(df_feat.values, dtype=np.float64)
+            X_scaled = scaler.transform(X_mat)
             prob_patologia = float(modelo.predict_proba(X_scaled)[0, 1])
             es_patologico = prob_patologia >= umbral_clinico
             
